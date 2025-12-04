@@ -2,7 +2,7 @@
 bl_info = {
     "name": "WWMI VG Fixer",
     "author": "LatanH2",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > WWMI VG Fixer",
     "description": "Fix vertex groups for WWMI reverse meshes using metadata.json",
@@ -50,10 +50,7 @@ class WWMI_OT_auto_fix_vgs(bpy.types.Operator):
     def execute(self, context):
 
         scene = context.scene
-        metadata_path = scene.wwmi_vg_metadata_path
-
-        metadata_path = bpy.path.abspath(metadata_path)
-
+        metadata_path = bpy.path.abspath(scene.wwmi_vg_metadata_path)
         remove_zero = scene.wwmi_vg_remove_zero
 
         if not metadata_path or not os.path.isfile(metadata_path):
@@ -71,87 +68,80 @@ class WWMI_OT_auto_fix_vgs(bpy.types.Operator):
             self.report({"ERROR"}, "Invalid metadata: no 'components'")
             return {"CANCELLED"}
 
-        merged_max_vg = max(
-            v for comp in components for v in comp["vg_map"].values()
-        )
+        merged_max_vg = max(v for comp in components for v in comp["vg_map"].values())
         threshold = merged_max_vg - 256
+        print(f"Merged Max VG: {merged_max_vg}  -> threshold {threshold}")
 
-        print(f"Merged Max VG: {merged_max_vg}  → threshold: {threshold}")
-
+        # Global exceptions: component ID >= 3
         global_exception_vgs = set()
         for comp_id, comp in enumerate(components):
             if comp_id >= 3:
                 global_exception_vgs |= set(comp["vg_map"].values())
-
-        print(f"Global exceptions count: {len(global_exception_vgs)}")
+        print(f"Global shared exceptions: {len(global_exception_vgs)} items")
 
         comp_name_regex = re.compile(r"Component\s*(\d+)")
         processed_count = 0
 
         for obj in context.selected_objects:
-            if obj.type != "MESH":
-                continue
+            if obj.type != "MESH": continue
 
             match = comp_name_regex.search(obj.name)
             if not match:
-                print(f"[{obj.name}] No Component ID, skipped.")
+                print(f"[{obj.name}] No Component ID")
                 continue
 
             comp_id = int(match.group(1))
             if comp_id >= len(components):
-                print(f"[{obj.name}] Component ID out of range, skipped.")
+                print(f"[{obj.name}] CompID out of range")
                 continue
 
-            exception_vgs_local = set(
-                components[comp_id]["vg_map"].values()
-            )
-            component_max_vg = max(exception_vgs_local)
+            local_vg_map = set(components[comp_id]["vg_map"].values())
+            component_max_vg = max(local_vg_map)
 
             print(f"\n[{obj.name}] CompID={comp_id} MaxVG={component_max_vg}")
 
             for vg in obj.vertex_groups:
-                name_old = vg.name
-
-                try:
-                    vg_num = int(name_old)
+                original_name = vg.name
+                try: vg_num = int(original_name)
                 except ValueError:
-                    print(f" - '{name_old}': skip text")
+                    print(f" - {original_name}: skip text")
                     continue
 
+                # Out of remap range = keep
                 if vg_num > threshold:
-                    print(f" - {name_old} keep (>threshold)")
+                    print(f" - {original_name} keep (>threshold)")
                     continue
 
-                if vg_num in global_exception_vgs:
+                if vg_num in global_exception_vgs or vg_num in local_vg_map:
 
                     if component_max_vg >= 256:
-                        if not name_old.startswith("Check"):
-                            new_name = f"Check{name_old}"
+                        if not original_name.startswith("Check"):
+                            new_name = f"Check{original_name}"
                             vg.name = new_name
-                            print(f" - {name_old} → {new_name} (global exception)")
+                            print(f" - {original_name} → {new_name} (exception)")
                         else:
-                            print(f" - {name_old} keep (Check exists)")
+                            print(f" - {original_name} keep (Check exists)")
                     else:
-                        print(f" - {name_old} keep (global except no Check)")
+                        print(f" - {original_name} keep (exception no Check)")
                     continue
 
+                # Standard +256 remap
                 new_name = str(vg_num + 256)
                 vg.name = new_name
-                print(f" - {name_old} → {new_name} (+256)")
+                print(f" - {original_name} → {new_name} (+256)")
 
             if remove_zero:
-                print(" >> Cleanup Zero-Weight VGs")
                 remove_zero_weight_vgroups(obj)
 
             processed_count += 1
 
-        self.report({"INFO"}, f"Processed {processed_count} object(s)")
         print("\n=== Auto Fix Complete ===")
+        self.report({"INFO"}, f"Processed {processed_count} objects")
         return {"FINISHED"}
 
 
 # ------------------------------------------
-# Operator: Remove "Check" prefix
+# Operator: Remove "Check" Prefix
 # ------------------------------------------
 
 class WWMI_OT_remove_check_prefix(bpy.types.Operator):
@@ -164,28 +154,21 @@ class WWMI_OT_remove_check_prefix(bpy.types.Operator):
         regex = re.compile(r"^Check(\d+)$")
         processed = 0
 
-        print("\n=== Remove Check Prefix Begin ===")
-
         for obj in context.selected_objects:
-            if obj.type != "MESH":
-                continue
+            if obj.type != "MESH": continue
 
-            print(f"[{obj.name}]")
             changed = False
-
             for vg in obj.vertex_groups:
                 m = regex.match(vg.name)
                 if m:
                     new_name = m.group(1)
-                    print(f" - {vg.name} → {new_name}")
                     vg.name = new_name
                     changed = True
 
             if changed:
                 processed += 1
 
-        print("=== Remove Check Prefix Done ===")
-        self.report({"INFO"}, f"Updated {processed} object(s)")
+        self.report({"INFO"}, f"Updated {processed} objects")
         return {"FINISHED"}
 
 
@@ -205,15 +188,10 @@ class VIEW3D_PT_wwmi_vg_fixer(bpy.types.Panel):
         scene = context.scene
 
         layout.prop(scene, "wwmi_vg_metadata_path", text="Metadata JSON")
-        layout.prop(scene, "wwmi_vg_remove_zero",
-                    text="Remove Zero-Weight VGs")
-
+        layout.prop(scene, "wwmi_vg_remove_zero", text="Remove Zero-Weight VGs")
         layout.separator()
-
-        layout.operator("wwmi.auto_fix_vgs",
-                       icon="MOD_VERTEX_WEIGHT")
-        layout.operator("wwmi.remove_check_prefix",
-                       icon="BACK")
+        layout.operator("wwmi.auto_fix_vgs", icon="MOD_VERTEX_WEIGHT")
+        layout.operator("wwmi.remove_check_prefix", icon="BACK")
 
 
 # ------------------------------------------
@@ -229,18 +207,16 @@ classes = (
 
 def register():
     from bpy.props import StringProperty, BoolProperty
-
     for c in classes:
         bpy.utils.register_class(c)
 
     bpy.types.Scene.wwmi_vg_metadata_path = StringProperty(
         name="Metadata JSON",
-        subtype="FILE_PATH"
+        subtype="FILE_PATH",
     )
-
     bpy.types.Scene.wwmi_vg_remove_zero = BoolProperty(
         name="Remove Zero-Weight VGs",
-        default=True
+        default=True,
     )
 
 
